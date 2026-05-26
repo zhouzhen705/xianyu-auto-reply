@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Literal
@@ -426,38 +427,42 @@ def worker_loop() -> None:
 
 def request_backend_qr_login() -> dict[str, Any]:
     base_url = os.getenv("XIANYU_BACKEND_BASE_URL", "http://127.0.0.1:8089").strip().rstrip("/")
-    token = os.getenv("XIANYU_BACKEND_TOKEN", "").strip()
     timeout_seconds = int(os.getenv("XIANYU_BACKEND_QR_TIMEOUT_SECONDS", "90"))
     url = f"{base_url}/api/v1/qr-login/generate"
-    request = urllib.request.Request(
-        url,
-        data=b"{}",
-        headers={
-            "content-type": "application/json",
-            **({"authorization": f"Bearer {token}"} if token else {}),
-        },
-        method="POST",
-    )
 
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
+    for attempt in range(2):
+        request = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={
+                "content-type": "application/json",
+                **backend_auth_header(),
+            },
+            method="POST",
+        )
+
         try:
-            error_payload = json.loads(exc.read().decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            error_payload = {}
-        return {
-            "ok": False,
-            "error": "XIANYU_QR_BACKEND_REJECTED",
-            "message": str(error_payload.get("message") or f"QR backend returned HTTP {exc.code}."),
-        }
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        return {
-            "ok": False,
-            "error": "XIANYU_QR_BACKEND_UNAVAILABLE",
-            "message": f"Unable to reach Xianyu QR backend at {url}. Start backend-web or set XIANYU_BACKEND_BASE_URL. {exc}",
-        }
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0 and refresh_backend_token():
+                continue
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                error_payload = {}
+            return {
+                "ok": False,
+                "error": "XIANYU_QR_BACKEND_REJECTED",
+                "message": str(error_payload.get("message") or f"QR backend returned HTTP {exc.code}."),
+            }
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            return {
+                "ok": False,
+                "error": "XIANYU_QR_BACKEND_UNAVAILABLE",
+                "message": f"Unable to reach Xianyu QR backend at {url}. Start backend-web or set XIANYU_BACKEND_BASE_URL. {exc}",
+            }
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if isinstance(data, dict) and payload.get("success") is not False:
@@ -479,23 +484,33 @@ def request_backend_qr_login() -> dict[str, Any]:
 
 def request_backend_qr_status(session_id: str) -> dict[str, Any]:
     base_url = os.getenv("XIANYU_BACKEND_BASE_URL", "http://127.0.0.1:8089").strip().rstrip("/")
-    token = os.getenv("XIANYU_BACKEND_TOKEN", "").strip()
     url = f"{base_url}/api/v1/qr-login/status/{session_id}"
-    request = urllib.request.Request(
-        url,
-        headers={**({"authorization": f"Bearer {token}"} if token else {})},
-        method="GET",
-    )
 
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        return {
-            "ok": False,
-            "status": state.login_status,
-            "message": f"Unable to query Xianyu QR status. {exc}",
-        }
+    for attempt in range(2):
+        request = urllib.request.Request(
+            url,
+            headers=backend_auth_header(),
+            method="GET",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0 and refresh_backend_token():
+                continue
+            return {
+                "ok": False,
+                "status": state.login_status,
+                "message": f"Unable to query Xianyu QR status. HTTP {exc.code}",
+            }
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            return {
+                "ok": False,
+                "status": state.login_status,
+                "message": f"Unable to query Xianyu QR status. {exc}",
+            }
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if isinstance(data, dict):
@@ -511,6 +526,80 @@ def request_backend_qr_status(session_id: str) -> dict[str, Any]:
         "status": payload.get("status") if isinstance(payload, dict) else state.login_status,
         "message": payload.get("message") if isinstance(payload, dict) else "",
     }
+
+
+def backend_auth_header() -> dict[str, str]:
+    token = os.getenv("XIANYU_BACKEND_TOKEN", "").strip()
+    return {"authorization": f"Bearer {token}"} if token else {}
+
+
+def refresh_backend_token() -> bool:
+    base_url = os.getenv("XIANYU_BACKEND_BASE_URL", "http://127.0.0.1:8089").strip().rstrip("/")
+    username = os.getenv("XIANYU_BACKEND_USERNAME", "admin").strip()
+    password = os.getenv("XIANYU_BACKEND_PASSWORD", "admin123").strip()
+
+    if not username or not password:
+        return False
+
+    token = login_backend_with_json(base_url, username, password) or login_backend_with_form(base_url, username, password)
+    if not token:
+        return False
+
+    os.environ["XIANYU_BACKEND_TOKEN"] = token
+    persist_control_env_value("XIANYU_BACKEND_TOKEN", token)
+    return True
+
+
+def login_backend_with_json(base_url: str, username: str, password: str) -> str | None:
+    request = urllib.request.Request(
+        f"{base_url}/api/v1/auth/login",
+        data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    return read_backend_token_response(request)
+
+
+def login_backend_with_form(base_url: str, username: str, password: str) -> str | None:
+    request = urllib.request.Request(
+        f"{base_url}/api/v1/auth/token",
+        data=urllib.parse.urlencode({"username": username, "password": password}).encode("utf-8"),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    return read_backend_token_response(request)
+
+
+def read_backend_token_response(request: urllib.request.Request) -> str | None:
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    token = payload.get("token") or payload.get("access_token") or data.get("token") or data.get("access_token")
+    return str(token) if token else None
+
+
+def persist_control_env_value(key: str, value: str) -> None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines() if env_path.exists() else []
+    updated = False
+
+    for index, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[index] = f"{key}={value}"
+            updated = True
+            break
+
+    if not updated:
+        lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def start_worker() -> dict[str, Any]:
