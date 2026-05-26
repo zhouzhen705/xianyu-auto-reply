@@ -15,9 +15,10 @@ Completed and verified locally:
 
 - TradingHub `/admin/xianyu` can reach `control_service`.
 - `backend-web` can generate a real Xianyu QR login image.
+- Scanned accounts are readable from `xy_accounts` through `GET /accounts`.
 - `websocket` starts on `8090` and passes `/health`.
-- `scheduler` starts on `8091` and passes `/health`.
-- `/worker/start` starts or reuses `websocket` and `scheduler`.
+- `scheduler` can start and run scheduled account/order jobs, but local constant-runtime behavior still needs validation.
+- `/worker/start` starts or reuses `websocket`, attempts to start `scheduler`, and starts the TradingHub order bridge.
 - The order bridge polls `xy_orders` and posts RiskManager callbacks to TradingHub.
 - A local `TEST-` paid order generated a TradingHub license and wrote `delivery_content`.
 - A local `TEST-` refunded order disabled the license and wrote callback metadata.
@@ -63,6 +64,7 @@ Do not commit real token or password values.
 - `POST /worker/start`
 - `POST /worker/stop`
 - `GET /worker/status`
+- `GET /accounts`
 - `GET /events/recent`
 - `GET /messages/recent`
 - `GET /config`

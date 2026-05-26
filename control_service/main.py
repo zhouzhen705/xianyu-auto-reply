@@ -33,6 +33,7 @@ from control_service.state import (
     config_dict,
     clear_activity,
     dry_run_order_event,
+    get_xianyu_accounts,
     refresh_login_status,
     start_login,
     start_worker,
@@ -117,6 +118,11 @@ def events_recent() -> dict[str, Any]:
 @app.get("/messages/recent", dependencies=[Depends(require_internal_token)])
 def messages_recent() -> dict[str, Any]:
     return {"ok": True, "messages": state.recent_messages}
+
+
+@app.get("/accounts", dependencies=[Depends(require_internal_token)])
+def accounts() -> dict[str, Any]:
+    return {"ok": True, "accounts": get_xianyu_accounts()}
 
 
 @app.get("/config", dependencies=[Depends(require_internal_token)])
