@@ -115,6 +115,11 @@ def status_dict(message: str = "") -> dict[str, Any]:
 
 
 def start_login() -> dict[str, Any]:
+    state.login_status = "not_logged_in"
+    state.qr_session_id = None
+    state.qr_image_url = None
+    state.qr_content = None
+
     backend_result = request_backend_qr_login()
     state.login_status = "waiting_scan"
 
@@ -143,7 +148,7 @@ def refresh_login_status() -> dict[str, Any]:
         state.login_status = "logged_in"
     elif status in {"expired", "failed", "cancelled", "error"}:
         state.login_status = "expired"
-    elif status in {"scanned", "processing", "pending"}:
+    elif status in {"waiting", "scanned", "processing", "pending"}:
         state.login_status = "waiting_scan"
 
     return status_dict(str(backend_result.get("message") or ""))
@@ -456,10 +461,13 @@ def request_backend_qr_login() -> dict[str, Any]:
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if isinstance(data, dict) and payload.get("success") is not False:
+        qr_code_url = data.get("qr_code_url")
+        if isinstance(qr_code_url, str) and qr_code_url.startswith("/"):
+            qr_code_url = f"{base_url}{qr_code_url}"
         return {
             "ok": True,
             "session_id": data.get("session_id"),
-            "qr_code_url": data.get("qr_code_url"),
+            "qr_code_url": qr_code_url,
         }
 
     return {
