@@ -10,16 +10,21 @@ from fastapi.responses import JSONResponse
 
 
 def load_local_env() -> None:
-    env_path = Path(__file__).resolve().parent / ".env"
-    if not env_path.exists():
-        return
+    env_paths = [
+        Path(__file__).resolve().parent / ".env",
+        Path(__file__).resolve().parents[3] / ".env.local",
+    ]
 
-    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
+    for env_path in env_paths:
+        if not env_path.exists():
             continue
-        key, value = stripped.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 load_local_env()
@@ -84,6 +89,7 @@ def login_status() -> dict[str, Any]:
         "qr_content": state.qr_content,
         "qr_image_url": state.qr_image_url,
         "qr_session_id": state.qr_session_id,
+        "account_count": refreshed.get("account_count"),
         "message": refreshed.get("message", ""),
     }
 

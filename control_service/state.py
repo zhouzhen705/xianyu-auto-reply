@@ -109,6 +109,7 @@ def status_dict(message: str = "") -> dict[str, Any]:
         "qr_content": state.qr_content,
         "qr_image_url": state.qr_image_url,
         "qr_session_id": state.qr_session_id,
+        "account_count": get_xianyu_account_count(),
         "config": config_dict(),
         "recent_messages": state.recent_messages,
         "recent_events": state.recent_events,
@@ -147,9 +148,10 @@ def refresh_login_status() -> dict[str, Any]:
 
     if status in {"success", "logged_in", "already_processed"}:
         state.login_status = "logged_in"
+        sync_successful_qr_login(backend_result)
     elif status in {"expired", "failed", "cancelled", "error"}:
         state.login_status = "expired"
-    elif status in {"waiting", "scanned", "processing", "pending"}:
+    elif status in {"waiting", "scanned", "processing", "pending", "verification_required"}:
         state.login_status = "waiting_scan"
 
     return status_dict(str(backend_result.get("message") or ""))
@@ -526,6 +528,168 @@ def request_backend_qr_status(session_id: str) -> dict[str, Any]:
         "status": payload.get("status") if isinstance(payload, dict) else state.login_status,
         "message": payload.get("message") if isinstance(payload, dict) else "",
     }
+
+
+def request_backend_qr_cookie(session_id: str) -> dict[str, Any]:
+    base_url = os.getenv("XIANYU_BACKEND_BASE_URL", "http://127.0.0.1:8089").strip().rstrip("/")
+    url = f"{base_url}/api/v1/qr-login/cookie/{session_id}"
+
+    for attempt in range(2):
+        request = urllib.request.Request(
+            url,
+            headers=backend_auth_header(),
+            method="GET",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0 and refresh_backend_token():
+                continue
+            return {"ok": False, "message": f"Unable to query Xianyu QR cookie. HTTP {exc.code}"}
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            return {"ok": False, "message": f"Unable to query Xianyu QR cookie. {exc}"}
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    return {
+        "ok": payload.get("success") is not False if isinstance(payload, dict) else False,
+        "message": payload.get("message") if isinstance(payload, dict) else "",
+        "data": data if isinstance(data, dict) else {},
+    }
+
+
+def sync_successful_qr_login(backend_result: dict[str, Any]) -> None:
+    if not state.qr_session_id:
+        return
+
+    account_info = backend_result.get("account_info") if isinstance(backend_result.get("account_info"), dict) else {}
+    before_count = get_xianyu_account_count()
+    cookie_result = request_backend_qr_cookie(state.qr_session_id)
+    cookie_data = cookie_result.get("data") if isinstance(cookie_result.get("data"), dict) else {}
+
+    cookie_value = extract_cookie_value(cookie_data)
+    account_id = extract_account_id(account_info, cookie_data)
+
+    if not cookie_value:
+        record_message(
+            "Xianyu QR login reached success state, but backend did not expose a cookie yet.",
+            {"account_count": before_count, "has_account_info": bool(account_info), "cookie_available": False},
+        )
+        return
+
+    create_result = create_backend_account(account_id, cookie_value)
+    after_count = get_xianyu_account_count()
+    record_message(
+        "Xianyu QR login synced into backend account storage.",
+        {
+            "ok": bool(create_result.get("ok")),
+            "account_count_before": before_count,
+            "account_count_after": after_count,
+            "created_or_updated": after_count >= before_count,
+        },
+    )
+
+    if after_count > before_count and state.worker_status == "running":
+        restart_listener_services_after_login()
+
+
+def extract_cookie_value(data: dict[str, Any]) -> str:
+    for key in ("cookie", "value", "cookie_string"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    cookies = data.get("cookies")
+    if isinstance(cookies, dict):
+        return "; ".join(f"{key}={value}" for key, value in cookies.items() if value is not None)
+    if isinstance(cookies, list):
+        pairs: list[str] = []
+        for item in cookies:
+            if isinstance(item, dict):
+                name = item.get("name")
+                value = item.get("value")
+                if name and value is not None:
+                    pairs.append(f"{name}={value}")
+        return "; ".join(pairs)
+
+    return ""
+
+
+def extract_account_id(account_info: dict[str, Any], data: dict[str, Any]) -> str:
+    for source in (account_info, data):
+        for key in ("account_id", "id", "unb", "user_id", "nick"):
+            value = source.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value).strip()
+
+    return f"xianyu-{now_ms()}"
+
+
+def create_backend_account(account_id: str, cookie_value: str) -> dict[str, Any]:
+    base_url = os.getenv("XIANYU_BACKEND_BASE_URL", "http://127.0.0.1:8089").strip().rstrip("/")
+    url = f"{base_url}/api/v1/cookies"
+    body = json.dumps({"id": account_id, "value": cookie_value}, ensure_ascii=False).encode("utf-8")
+
+    for attempt in range(2):
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "content-type": "application/json",
+                **backend_auth_header(),
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return {"ok": payload.get("success") is not False, "message": payload.get("message", "")}
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0 and refresh_backend_token():
+                continue
+            return {"ok": False, "message": f"Backend account sync failed. HTTP {exc.code}"}
+        except Exception as exc:
+            return {"ok": False, "message": f"Backend account sync failed. {type(exc).__name__}"}
+
+    return {"ok": False, "message": "Backend account sync failed."}
+
+
+def get_xianyu_account_count() -> int | None:
+    try:
+        import pymysql  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    try:
+        connection = pymysql.connect(
+            host=os.getenv("MYSQL_HOST", "localhost"),
+            port=int(os.getenv("MYSQL_PORT", "3306")),
+            user=os.getenv("MYSQL_USER", "root"),
+            password=os.getenv("MYSQL_PASSWORD", ""),
+            database=os.getenv("MYSQL_DATABASE", "xianyu_auto_reply"),
+            charset="utf8mb4",
+            connect_timeout=3,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM xy_accounts")
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        finally:
+            connection.close()
+    except Exception:
+        return None
+
+
+def restart_listener_services_after_login() -> None:
+    record_message("Restarting Xianyu listener services so the new account can be loaded.", {})
+    stop_port(SERVICE_PORTS["websocket"])
+    stop_port(SERVICE_PORTS["scheduler"])
+    start_python_service("websocket", "websocket")
+    start_python_service("scheduler", "scheduler")
 
 
 def backend_auth_header() -> dict[str, str]:
