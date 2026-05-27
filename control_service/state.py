@@ -36,6 +36,7 @@ class ControlState:
     qr_content: str | None = None
     qr_image_url: str | None = None
     qr_session_id: str | None = None
+    qr_started_at_ms: int | None = None
     config: ControlConfig = dataclasses.field(default_factory=ControlConfig)
     recent_messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     recent_events: list[dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -164,6 +165,7 @@ def start_login() -> dict[str, Any]:
     state.qr_session_id = None
     state.qr_image_url = None
     state.qr_content = None
+    state.qr_started_at_ms = None
 
     backend_result = request_backend_qr_login()
     state.login_status = "waiting_scan"
@@ -172,6 +174,7 @@ def start_login() -> dict[str, Any]:
         state.qr_session_id = str(backend_result.get("session_id") or "")
         state.qr_image_url = str(backend_result.get("qr_code_url") or "") or None
         state.qr_content = None
+        state.qr_started_at_ms = now_ms()
         record_message("闲鱼登录二维码已由 backend-web 生成。", {"session_id": state.qr_session_id})
         return status_dict("闲鱼登录二维码已生成。")
 
@@ -186,11 +189,21 @@ def refresh_login_status() -> dict[str, Any]:
     if not state.qr_session_id:
         return status_dict()
 
+    timeout_seconds = max(30, int(os.getenv("XIANYU_BACKEND_QR_TIMEOUT_SECONDS", "90")))
+    if (
+        state.login_status == "waiting_scan"
+        and state.qr_started_at_ms is not None
+        and now_ms() - state.qr_started_at_ms > timeout_seconds * 1000
+    ):
+        state.login_status = "expired"
+        return status_dict("Xianyu QR login code expired. Please generate a new code.")
+
     backend_result = request_backend_qr_status(state.qr_session_id)
     status = str(backend_result.get("status") or "")
 
     if status in {"success", "logged_in", "already_processed"}:
         state.login_status = "logged_in"
+        state.qr_started_at_ms = None
         sync_successful_qr_login(backend_result)
     elif status in {"expired", "failed", "cancelled", "error"}:
         state.login_status = "expired"

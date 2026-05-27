@@ -257,9 +257,67 @@ export const generateQRLogin = async (): Promise<{ success: boolean; session_id?
 }
 
 // 检查扫码登录状态
+export type QRLoginStatus =
+  | 'pending'
+  | 'scanned'
+  | 'success'
+  | 'failed'
+  | 'expired'
+  | 'cancelled'
+  | 'verification_required'
+  | 'processing'
+  | 'already_processed'
+  | 'not_found'
+  | 'error'
+  | 'unknown'
+
+const normalizeQRLoginStatus = (status?: string): QRLoginStatus => {
+  const normalized = (status || '').trim().toLowerCase()
+  switch (normalized) {
+    case 'new':
+    case 'ready':
+    case 'waiting':
+    case 'pending':
+      return 'pending'
+    case 'scaned':
+    case 'scanned':
+      return 'scanned'
+    case 'processing':
+    case 'confirming':
+      return 'processing'
+    case 'confirmed':
+    case 'login_success':
+    case 'logged_in':
+    case 'success':
+      return 'success'
+    case 'already_processed':
+      return 'already_processed'
+    case 'expired':
+      return 'expired'
+    case 'canceled':
+    case 'cancelled':
+      return 'cancelled'
+    case 'verification_required':
+    case 'face_verification':
+    case 'need_verify':
+      return 'verification_required'
+    case 'failed':
+    case 'fail':
+      return 'failed'
+    case 'not_found':
+      return 'not_found'
+    case 'error':
+    case '':
+      return 'error'
+    default:
+      return 'unknown'
+  }
+}
+
 export const checkQRLoginStatus = async (sessionId: string): Promise<{
   success: boolean
-  status: 'pending' | 'scanned' | 'success' | 'failed' | 'expired' | 'cancelled' | 'verification_required' | 'processing' | 'already_processed' | 'error'
+  status: QRLoginStatus
+  raw_status?: string
   message?: string
   account_info?: {
     account_id: string
@@ -268,7 +326,9 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
 }> => {
   const result = await get<{
     success: boolean
+    status?: string
     message?: string
+    account_info?: { account_id: string; is_new_account: boolean }
     data?: {
       status: string
       message?: string
@@ -276,12 +336,14 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
     }
   }>(`${QR_LOGIN_PREFIX}/status/${sessionId}`)
   // 从标准ApiResponse格式中提取数据
-  const status = result.data?.status || 'error'
+  const rawStatus = result.data?.status || result.status
+  const status = normalizeQRLoginStatus(rawStatus)
   return {
     success: result.success,
-    status: status as 'pending' | 'scanned' | 'success' | 'failed' | 'expired' | 'cancelled' | 'verification_required' | 'processing' | 'already_processed' | 'error',
+    status,
+    raw_status: rawStatus,
     message: result.message || result.data?.message,
-    account_info: result.data?.account_info,
+    account_info: result.data?.account_info || result.account_info,
   }
 }
 

@@ -371,11 +371,15 @@ export function Accounts() {
 
   const startQrCheck = (sessionId: string) => {
     clearQrCheck()
+    let consecutiveErrors = 0
     qrCheckIntervalRef.current = setInterval(async () => {
       try {
         const result = await checkQRLoginStatus(sessionId)
+        consecutiveErrors = 0
 
         switch (result.status) {
+          case 'pending':
+            break
           case 'scanned':
             setQrStatus('scanned')
             break
@@ -424,9 +428,31 @@ export function Accounts() {
             setQrErrorMessage(result.message || '扫码状态查询失败')
             clearQrCheck()
             break
+          case 'not_found':
+            setQrStatus('error')
+            setQrErrorMessage(result.message || '二维码登录会话不存在，请重新生成二维码')
+            clearQrCheck()
+            addToast({ type: 'error', message: result.message || '二维码登录会话不存在，请重新生成二维码' })
+            break
+          case 'unknown':
+            {
+              const message = `二维码登录返回了未知状态：${result.raw_status || 'unknown'}`
+              setQrStatus('error')
+              setQrErrorMessage(message)
+              clearQrCheck()
+              addToast({ type: 'error', message })
+            }
+            break
         }
-      } catch {
-        // 忽略网络错误，继续轮询
+      } catch (error) {
+        consecutiveErrors += 1
+        if (consecutiveErrors >= 3) {
+          const message = `二维码登录状态查询失败：${getApiErrorMessage(error, '请检查网络或后端服务')}`
+          setQrStatus('error')
+          setQrErrorMessage(message)
+          clearQrCheck()
+          addToast({ type: 'error', message })
+        }
       }
     }, 2000)
   }
